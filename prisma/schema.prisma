@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- AUTH MODELLERİ ---
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  username      String?   @unique
+  password      String?   // Şifreli şifre için (hash)
+  role          String    @default("user")
+  createdAt     DateTime  @default(now())
+  avatarUrl     String?   @db.Text // Profil fotoğrafı - küçültülmüş base64 data URL olarak saklanıyor
+
+  // Auth ilişkileri
+  accounts      Account[]
+  sessions      Session[]
+
+  // P2P Room ilişkileri
+  createdRooms  Room[]    @relation("RoomCreator")
+  joinedRooms   Room[]    @relation("RoomParticipants")
+
+  // Gönderilen ve Alınan Mesajlar (Veritabanı arşivleme için)
+  sentMessages     Message[] @relation("MessageSender")
+  receivedMessages Message[] @relation("MessageRecipient")
+
+  // Oda içi canlı üyelik (kimin şu an hangi odada olduğu)
+  roomPresences RoomPresence[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// --- P2P ROOM MODELLERİ & MESAJ ARŞİVİ ---
+
+model Room {
+  id           String   @id @default(cuid())
+  name         String?
+  createdAt    DateTime @default(now())
+
+  // Odayı yöneten kişi
+  creatorId    String
+  creator      User     @relation("RoomCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+
+  // Odaya katılan diğer kullanıcılar (geçmiş/kalıcı üyelik listesi)
+  participants User[]   @relation("RoomParticipants")
+
+  // Odaya ait arşivlenmiş mesajlar
+  messages     Message[]
+
+  // O an odada AKTİF olan kullanıcılar (canlı, heartbeat ile güncellenen)
+  presences    RoomPresence[]
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  text       String   @db.Text
+  createdAt  DateTime @default(now())
+
+  // İlişkiler
+  roomId     String?
+  room       Room?    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  senderId   String
+  sender     User     @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  // Alıcı Peer ID (Birebir P2P mesajlar için opsiyonel)
+  recipientId String?
+  recipient   User?    @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+}
+
+// Bir kullanıcının bir odaya "şu an aktif bağlı" olduğunu gösteren canlı kayıt.
+// İstemci birkaç saniyede bir heartbeat göndererek lastSeen'i günceller;
+// lastSeen belirli bir süreden eskiyse (örn. 15sn) o kullanıcı artık
+// odada aktif sayılmaz. Oda ayrılırken kayıt tamamen silinir.
+model RoomPresence {
+  id        String   @id @default(cuid())
+
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Kullanıcının o oturumdaki sabit PeerJS kodu ('p2p-' + userId)
+  peerId    String
+
+  joinedAt  DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([roomId, userId])
+}
+
+// Kayıt sırasında e-posta doğrulaması bekleyen hesaplar. Kullanıcı formu
+// doldurduğunda buraya (şifresi zaten hash'lenmiş halde) geçici olarak
+// yazılır ve e-postasına 6 haneli kod gönderilir. Kod doğrulanınca gerçek
+// User kaydı oluşturulur ve bu geçici kayıt silinir. Doğrulanmazsa burada
+// kalır — User tablosunda hiçbir zaman doğrulanmamış hesap birikmez.
+model PendingRegistration {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  username  String
+  password  String   // bcrypt ile zaten hash'lenmiş halde saklanır
+  code      String   // 6 haneli doğrulama kodu
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// "Şifremi unuttum" akışı için geçici doğrulama kodu. Kullanıcı e-postasını
+// girer, buraya (varsa mevcut kaydın üzerine) bir kod yazılıp e-postaya
+// gönderilir. Kod doğrulanınca User.password güncellenir ve bu kayıt silinir.
+model PasswordReset {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
