@@ -8,7 +8,6 @@ async function main() {
         email: "test@ornek.com",
         username: "testuser",
         password: "hashedpassword123",
-        nickname: "TestKullanicisi",
       },
     });
     console.log("Kayıt başarıyla oluşturuldu:", newUser);
