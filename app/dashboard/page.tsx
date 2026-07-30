@@ -3,7 +3,7 @@
 import { performLocalLogout } from '@/lib/auth';
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield, Send, Copy, CheckCircle, Wifi, Bell, MessageSquare, Users, Trash2, Key, Layers, Activity, Mail, Mic, MicOff, PhoneOff, Hash, Plus, LogIn, Volume2, VolumeX, Settings2, Smile, Paperclip, File as FileIcon, Download, Monitor, MonitorOff, Video, VideoOff, Reply, X } from 'lucide-react';
+import { Shield, Send, Copy, CheckCircle, Wifi, Bell, MessageSquare, Users, Trash2, Key, Layers, Activity, Mail, Mic, MicOff, PhoneOff, Hash, Plus, LogIn, Volume2, VolumeX, Settings2, Smile, Paperclip, File as FileIcon, Download, Monitor, MonitorOff, Video, VideoOff, Reply, X, UserX, Crown } from 'lucide-react';
 
 interface FileAttachment {
   name: string;
@@ -23,6 +23,7 @@ interface Message {
   sender: 'me' | 'peer';
   senderName: string;
   senderAvatar: string;
+  senderAvatarUrl?: string | null;
   text: string;
   time: string;
   file?: FileAttachment;
@@ -38,6 +39,7 @@ interface ActiveChat {
   id: string;
   name: string;
   avatar: string;
+  avatarUrl?: string | null; // Gerçek profil fotoğrafı (varsa)
   userId?: string; // Kalıcı kullanıcı kimliği (localStorage'daki gerçek User.id)
   isOnline?: boolean; // Bağlantı durumu — kopunca sohbet silinmiyor, sadece işaretleniyor
 }
@@ -48,6 +50,7 @@ interface RoomMessage {
   senderId: string;
   senderName: string;
   senderAvatar: string;
+  senderAvatarUrl?: string | null;
   text: string;
   time: string;
   file?: FileAttachment;
@@ -68,6 +71,7 @@ interface RoomMember {
   userId: string;
   username: string;
   peerId: string;
+  avatarUrl?: string | null;
 }
 
 const MAX_ROOM_PARTICIPANTS = 8;
@@ -405,6 +409,114 @@ function FileMessageContent({ file, onImageClick }: { file: FileAttachment; onIm
   );
 }
 
+// Seçilen bir resim dosyasını, canvas üzerinden max 128x128 boyutuna
+// küçültüp JPEG olarak base64 data URL'e çevirir. Böylece profil resimleri
+// veritabanında (Postgres TEXT alanında) makul boyutta kalır.
+function resizeImageToDataUrl(file: File, maxSize = 128, quality = 0.85): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height) {
+          if (width > maxSize) { height *= maxSize / width; width = maxSize; }
+        } else {
+          if (height > maxSize) { width *= maxSize / height; height = maxSize; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject(new Error('Canvas context alınamadı')); return; }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Ekran paylaşımı / kamera akışlarını gösteren <video> elementi.
+// ÖNEMLİ: Eğer ref'i doğrudan JSX içinde inline bir fonksiyonla
+// (`ref={(el) => { el.srcObject = stream }}`) versek, o fonksiyon HER
+// render'da yeniden oluşturulur ve React ref'i her seferinde önce null'a,
+// sonra tekrar elemana bağlar — bu da video akışının sürekli kopup
+// yeniden bağlanmasına, yani "göz kırpar gibi" siyah ekran flaşlamasına
+// sebep olur. Bu bileşen, srcObject'i sadece `stream` GERÇEKTEN
+// değiştiğinde (useEffect + dependency array) bağlayarak bu sorunu çözer.
+function StreamVideo({
+  stream,
+  className,
+  muted = false,
+  onClick,
+}: {
+  stream: MediaStream | null;
+  className?: string;
+  muted?: boolean;
+  onClick?: (e: React.MouseEvent<HTMLVideoElement>) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current && videoRef.current.srcObject !== stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      muted={muted}
+      playsInline
+      onClick={onClick}
+      className={className}
+    />
+  );
+}
+
+// Bir kişinin avatarını gösterir: avatarUrl varsa gerçek resim, yoksa baş
+// harflerden oluşan renkli daire. Uygulama genelinde (kendi profilin, 1-1
+// sohbet listesi, oda üyeleri, mesaj balonları) tutarlı şekilde kullanılıyor.
+function Avatar({
+  avatarUrl,
+  initials,
+  size = 32,
+  className = '',
+  gradient = false,
+}: {
+  avatarUrl?: string | null;
+  initials: string;
+  size?: number;
+  className?: string;
+  gradient?: boolean;
+}) {
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={initials}
+        style={{ width: size, height: size }}
+        className={`rounded-lg object-cover shrink-0 ${className}`}
+      />
+    );
+  }
+  return (
+    <div
+      style={{ width: size, height: size }}
+      className={`rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
+        gradient ? 'bg-gradient-to-br from-emerald-500 to-cyan-500 text-slate-950' : 'bg-slate-800 border border-slate-700 text-slate-200'
+      } ${className}`}
+    >
+      {initials}
+    </div>
+  );
+}
+
 function EmojiPicker({ onSelect, onClose }: { onSelect: (emoji: string) => void; onClose: () => void }) {
   return (
     <>
@@ -431,6 +543,8 @@ export default function DashboardPage() {
   const [userRole, setUserRole] = useState<string>('user');
   const [nickname, setNickname] = useState<string>('');
   const [userEmail, setUserEmail] = useState<string>(''); // hâlâ görüntü/varsa admin panel için tutuluyor
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null); // kendi profil fotoğrafım
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState<boolean>(false);
   const [userId, setUserId] = useState<string>(''); // localStorage'daki gerçek User.id (mesaj kaydı için asıl kullanılan kimlik)
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
@@ -461,7 +575,7 @@ export default function DashboardPage() {
   const [isMyRoomsLoading, setIsMyRoomsLoading] = useState<boolean>(false);
   const [newRoomName, setNewRoomName] = useState<string>('');
   const [joinRoomCode, setJoinRoomCode] = useState<string>('');
-  const [currentRoom, setCurrentRoom] = useState<{ id: string; name: string } | null>(null);
+  const [currentRoom, setCurrentRoom] = useState<{ id: string; name: string; creatorId?: string } | null>(null);
   const [roomMembers, setRoomMembers] = useState<RoomMember[]>([]);
   const [groupRoomMessages, setGroupRoomMessages] = useState<{ [roomId: string]: RoomMessage[] }>({});
   const [roomInputText, setRoomInputText] = useState<string>('');
@@ -476,6 +590,8 @@ export default function DashboardPage() {
   // --- SES KONTROL PANELİ ---
   const [showVoicePanel, setShowVoicePanel] = useState<boolean>(false);
   const [micGain, setMicGain] = useState<number>(100); // Kendi mikrofon seviyem (%), GainNode ile uygulanıyor
+  const [micMode, setMicMode] = useState<'always' | 'ptt'>('always'); // 'always' = her zaman açık, 'ptt' = bas-konuş
+  const [isPttActive, setIsPttActive] = useState<boolean>(false); // bas-konuş modunda şu an gerçekten konuşuyor muyum (tuş/buton basılı)
   const [isDeafened, setIsDeafened] = useState<boolean>(false); // "Kulaklığı kapat" — gelen tüm sesleri susturur
   const [remoteVolumes, setRemoteVolumes] = useState<{ [peerId: string]: number }>({}); // Her katılımcı için ayrı ses seviyesi (%)
   const [remoteMuted, setRemoteMuted] = useState<{ [peerId: string]: boolean }>({}); // Her katılımcıyı tek tek susturma
@@ -522,7 +638,7 @@ export default function DashboardPage() {
   // PeerJS event handler'ları (peer.on('connection')/('call')) closure içinde
   // eski state'i görebildiği için (stale closure), kritik değerleri ref'te
   // de tutup handler'lar içinde ref üzerinden okuyoruz.
-  const currentRoomRef = useRef<{ id: string; name: string } | null>(null);
+  const currentRoomRef = useRef<{ id: string; name: string; creatorId?: string } | null>(null);
   const isMicOnRef = useRef<boolean>(false);
   const nicknameRef = useRef<string>('');
   const userIdRef = useRef<string>('');
@@ -539,6 +655,12 @@ export default function DashboardPage() {
   const remoteVolumesRef = useRef<{ [peerId: string]: number }>({});
   const remoteMutedRef = useRef<{ [peerId: string]: boolean }>({});
   const isDeafenedRef = useRef<boolean>(false);
+  // Push-to-talk (bas-konuş) için ref'ler — klavye/mouse olay dinleyicileri
+  // stabil (bir kez kurulan) olduğundan, güncel değeri stale closure
+  // olmadan okuyabilmek için state'lerin ref kopyalarını tutuyoruz.
+  const micGainRef = useRef<number>(100);
+  const micModeRef = useRef<'always' | 'ptt'>('always');
+  const isPttActiveRef = useRef<boolean>(false);
 
   // --- EKRAN PAYLAŞIMI İÇİN REF'LER ---
   const screenStreamRef = useRef<MediaStream | null>(null); // kendi paylaştığım ekran akışı
@@ -549,6 +671,8 @@ export default function DashboardPage() {
   const cameraStreamRef = useRef<MediaStream | null>(null); // kendi kamera akışım
   const cameraMediaConnectionsRef = useRef<{ [peerId: string]: any }>({}); // giden kamera bağlantıları (bizden onlara)
   const isCameraOnRef = useRef<boolean>(false);
+  const avatarUrlRef = useRef<string | null>(null); // HANDSHAKE gönderirken güncel avatarı okumak için (stale closure önlemi)
+  const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   // Bu oturumda geçmişi zaten çekilmiş oda ID'leri — aynı odaya çıkıp tekrar
   // girildiğinde geçmişi gereksiz yere tekrar tekrar çekmemek için.
@@ -563,6 +687,68 @@ export default function DashboardPage() {
   useEffect(() => { isDeafenedRef.current = isDeafened; }, [isDeafened]);
   useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
   useEffect(() => { isCameraOnRef.current = isCameraOn; }, [isCameraOn]);
+  useEffect(() => { avatarUrlRef.current = avatarUrl; }, [avatarUrl]);
+  useEffect(() => { micGainRef.current = micGain; applyMicGain(); }, [micGain]);
+  useEffect(() => { micModeRef.current = micMode; applyMicGain(); }, [micMode]);
+  useEffect(() => { isPttActiveRef.current = isPttActive; applyMicGain(); }, [isPttActive]);
+
+  // userId belli olunca kendi profil fotoğrafımı sunucudan çekiyoruz
+  // (login akışı localStorage'a avatarUrl yazmıyor, bu yüzden ayrı bir istek).
+  useEffect(() => {
+    if (!userId) return;
+    fetch(`/api/users/avatar?userId=${encodeURIComponent(userId)}`)
+      .then((res) => res.json())
+      .then((data) => { if (data.success) setAvatarUrl(data.avatarUrl); })
+      .catch((err) => console.error("Avatar alınamadı:", err));
+  }, [userId]);
+
+  // Profil resmi seçilince: küçültüp sunucuya yollar, başarılı olursa yerel state'i günceller.
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !userId) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('Lütfen bir resim dosyası seç.');
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+    try {
+      const resizedDataUrl = await resizeImageToDataUrl(file, 128, 0.85);
+      const res = await fetch('/api/users/avatar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, avatarDataUrl: resizedDataUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Profil resmi yüklenemedi.');
+        return;
+      }
+      setAvatarUrl(resizedDataUrl);
+    } catch (err) {
+      console.error("Avatar yükleme hatası:", err);
+      alert('Profil resmi yüklenirken bir hata oluştu.');
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    if (!userId) return;
+    if (!confirm('Profil resmini kaldırmak istediğine emin misin?')) return;
+    try {
+      await fetch('/api/users/avatar', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      setAvatarUrl(null);
+    } catch (err) {
+      console.error("Avatar kaldırma hatası:", err);
+    }
+  };
 
   // Güvenli Ses Çalma
   const playNotificationSound = () => {
@@ -780,6 +966,7 @@ export default function DashboardPage() {
         type: 'HANDSHAKE',
         senderName: nickname,
         senderAvatar: nickname.substring(0, 2).toUpperCase(),
+        senderAvatarUrl: avatarUrlRef.current,
         senderUserId: userId // DÜZELTME: karşı tarafa gerçek veritabanı ID'mizi gönderiyoruz
       });
     });
@@ -790,13 +977,14 @@ export default function DashboardPage() {
           if (prev.some(chat => chat.id === remotePeerId)) {
             // Zaten varsa userId bilgisini güncelle (ilk bağlantıda boş olabilir)
             return prev.map(chat =>
-              chat.id === remotePeerId ? { ...chat, userId: data.senderUserId, isOnline: true } : chat
+              chat.id === remotePeerId ? { ...chat, userId: data.senderUserId, avatarUrl: data.senderAvatarUrl, isOnline: true } : chat
             );
           }
           return [...prev, {
             id: remotePeerId,
             name: data.senderName,
             avatar: data.senderAvatar,
+            avatarUrl: data.senderAvatarUrl,
             userId: data.senderUserId,
             isOnline: true
           }];
@@ -835,6 +1023,7 @@ export default function DashboardPage() {
         sender: 'peer',
         senderName: data.senderName,
         senderAvatar: data.senderAvatar,
+        senderAvatarUrl: data.senderAvatarUrl,
         text: data.text,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         file: data.type === 'FILE' ? data.file : undefined,
@@ -899,6 +1088,19 @@ export default function DashboardPage() {
     const remotePeerId = conn.peer;
 
     conn.on('data', (data: any) => {
+      if (data?.type === 'ROOM_FORCE_MUTE') {
+        if (data.targetUserId !== userIdRef.current) return;
+        stopMic();
+        alert('Oda sahibi tarafından susturuldun.');
+        return;
+      }
+
+      if (data?.type === 'ROOM_KICKED') {
+        alert('Oda sahibi tarafından odadan çıkarıldın.');
+        leaveRoom();
+        return;
+      }
+
       if (data?.type === 'ROOM_TYPING') {
         setRoomTypingUsers((prev) => ({
           ...prev,
@@ -941,6 +1143,7 @@ export default function DashboardPage() {
         senderId: data.senderId,
         senderName: data.senderName,
         senderAvatar: data.senderAvatar,
+        senderAvatarUrl: data.senderAvatarUrl,
         text: data.text,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         file: data.type === 'ROOM_FILE' ? data.file : undefined,
@@ -1244,7 +1447,7 @@ export default function DashboardPage() {
         return;
       }
       setSelectedPeerId(''); // 1-1 sohbeti kapat
-      setCurrentRoom({ id: roomId, name: roomName || 'Oda' });
+      setCurrentRoom({ id: roomId, name: data.room?.name || roomName || 'Oda', creatorId: data.room?.creatorId });
 
       // DÜZELTME: oda mesajları artık odadan çıkıp girince kaybolmuyor.
       // Bu oturumda bu odaya daha önce hiç girilmediyse (loadedRoomHistoryRef'te
@@ -1401,6 +1604,7 @@ export default function DashboardPage() {
       senderId: userId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: roomInputText,
       replyTo,
     };
@@ -1414,6 +1618,7 @@ export default function DashboardPage() {
       senderId: userId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: roomInputText,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       replyTo,
@@ -1436,6 +1641,18 @@ export default function DashboardPage() {
     setShowEmojiPicker(false);
   };
 
+  // Mikrofonun gerçek çıkış seviyesini hesaplayıp GainNode'a uygular:
+  // - "Her zaman açık" modunda her zaman ayarlanan seviyede
+  // - "Bas-konuş" modunda ise SADECE tuş/buton basılıyken (isPttActive) o
+  //   seviyede, aksi halde tamamen sessiz (gain 0). Akış/bağlantılar hiç
+  //   kesilmiyor — sadece çıkış sesi anlık olarak açılıp kapanıyor, bu
+  //   yüzden gecikme yaşanmıyor.
+  const applyMicGain = () => {
+    if (!micGainNodeRef.current) return;
+    const shouldBeAudible = micModeRef.current === 'always' || isPttActiveRef.current;
+    micGainNodeRef.current.gain.value = shouldBeAudible ? micGainRef.current / 100 : 0;
+  };
+
   // Mikrofonu açar: ses akışı alır, GainNode'dan geçirir (böylece "Mikrofon
   // Seviyen" kaydırıcısı akışı yeniden başlatmadan çalışabilir) ve odadaki
   // her mesh üyesine bu işlenmiş akışı yollar.
@@ -1449,7 +1666,9 @@ export default function DashboardPage() {
       const audioCtx = new AudioContextClass();
       const source = audioCtx.createMediaStreamSource(rawStream);
       const gainNode = audioCtx.createGain();
-      gainNode.gain.value = micGain / 100;
+      // Bas-konuş modundaysak akış SESSİZ başlar (tuşa basana kadar);
+      // her zaman açık moddaysak direkt ayarlı seviyede başlar.
+      gainNode.gain.value = micModeRef.current === 'ptt' ? 0 : micGainRef.current / 100;
       const dest = audioCtx.createMediaStreamDestination();
       source.connect(gainNode);
       gainNode.connect(dest);
@@ -1489,6 +1708,8 @@ export default function DashboardPage() {
       cleanupRoomVoicePeer(pid);
     });
     setIsMicOn(false);
+    isPttActiveRef.current = false;
+    setIsPttActive(false);
   };
 
   const toggleMic = () => {
@@ -1498,9 +1719,56 @@ export default function DashboardPage() {
 
   // Kendi mikrofon seviyeni değiştirir — akışı yeniden başlatmadan, canlı olarak.
   const handleMicGainChange = (value: number) => {
-    setMicGain(value);
-    if (micGainNodeRef.current) micGainNodeRef.current.gain.value = value / 100;
+    setMicGain(value); // ilgili useEffect applyMicGain()'i otomatik çağırır
   };
+
+  // Bas-konuş modunu açar/kapatır. Moddan çıkarken/girerken, mikrofon zaten
+  // açıksa çıkış seviyesini hemen yeni moda göre günceller.
+  const toggleMicMode = () => {
+    setMicMode((prev) => (prev === 'always' ? 'ptt' : 'always'));
+    isPttActiveRef.current = false;
+    setIsPttActive(false);
+  };
+
+  // Bas-konuş: konuşmaya başla / bitir. Hem Space tuşu hem de mikrofon
+  // butonunu basılı tutma ile tetiklenir.
+  const startPttTalking = () => {
+    if (micModeRef.current !== 'ptt' || !isMicOnRef.current) return;
+    isPttActiveRef.current = true;
+    setIsPttActive(true);
+    applyMicGain();
+  };
+  const stopPttTalking = () => {
+    if (micModeRef.current !== 'ptt') return;
+    isPttActiveRef.current = false;
+    setIsPttActive(false);
+    applyMicGain();
+  };
+
+  // Boşluk tuşu ile bas-konuş — yazı yazarken (input/textarea odaktayken)
+  // boşluk karakterinin normal çalışmasına dokunmuyoruz.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      if (micModeRef.current !== 'ptt' || !isMicOnRef.current) return;
+      e.preventDefault();
+      startPttTalking();
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      if (micModeRef.current !== 'ptt') return;
+      stopPttTalking();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Belirli bir katılımcının sesini yükseltir/kısar.
   const setRemoteVolume = (peerId: string, value: number) => {
@@ -1518,6 +1786,52 @@ export default function DashboardPage() {
       return { ...prev, [peerId]: nextMuted };
     });
   };
+
+  // =====================================================================
+  // ODA SAHİBİ (ADMİN) YETKİLERİ — sadece Room.creatorId === userId olan
+  // kişi kullanabilir. Susturma/atma sinyali mesh üzerinden doğrudan hedef
+  // kişiye yollanıyor; hedefin istemcisi bunu uygulamayı KENDİSİ yapıyor
+  // (P2P mimarisinde merkezi bir zorlama mekanizması yok — bu yüzden
+  // gerçek bir "sunucu tarafı zorla susturma" değil, güvene dayalı bir
+  // moderasyon sinyali). Atma işlemi ayrıca backend'de o kişinin canlı
+  // üyeliğini de siliyor.
+  const isRoomCreator = currentRoom?.creatorId === userId;
+
+  const handleForceMuteMember = (member: RoomMember) => {
+    if (!isRoomCreator || !currentRoom) return;
+    const conn = roomConnectionsRef.current[member.peerId];
+    if (conn) {
+      try { conn.send({ type: 'ROOM_FORCE_MUTE', targetUserId: member.userId }); } catch {}
+    }
+  };
+
+  const handleKickMember = async (member: RoomMember) => {
+    if (!isRoomCreator || !currentRoom) return;
+    if (!confirm(`${member.username} kullanıcısını odadan atmak istediğine emin misin?`)) return;
+
+    const conn = roomConnectionsRef.current[member.peerId];
+    if (conn) {
+      try { conn.send({ type: 'ROOM_KICKED' }); } catch {}
+    }
+    try { conn?.close(); } catch {}
+    delete roomConnectionsRef.current[member.peerId];
+
+    try {
+      await fetch(`/api/rooms/${currentRoom.id}/kick`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: userId, targetUserId: member.userId }),
+      });
+    } catch (err) {
+      console.error("Kullanıcı atma isteği başarısız:", err);
+    }
+    // Listeden hemen kaldır — sonraki poll zaten teyit edecek
+    setRoomMembers((prev) => prev.filter((m) => m.userId !== member.userId));
+  };
+
+  // =====================================================================
+  // ODA SAHİBİ YETKİLERİ SONU
+  // =====================================================================
 
   // "Kulaklığı kapat": odadaki HERKESİ tek seferde susturur/açar (kendi
   // mikrofonuna dokunmaz, sadece gelen sesleri keser).
@@ -1883,6 +2197,7 @@ export default function DashboardPage() {
       messageId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: `📎 ${file.name}`,
       file: fileAttachment,
       replyTo,
@@ -1898,6 +2213,7 @@ export default function DashboardPage() {
       sender: 'me',
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: `📎 ${file.name}`,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       file: fileAttachment,
@@ -1938,6 +2254,7 @@ export default function DashboardPage() {
       senderId: userId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: `📎 ${file.name}`,
       file: fileAttachment,
       replyTo,
@@ -1952,6 +2269,7 @@ export default function DashboardPage() {
       senderId: userId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: `📎 ${file.name}`,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       file: fileAttachment,
@@ -1983,6 +2301,7 @@ export default function DashboardPage() {
       messageId,
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: inputText,
       replyTo,
     };
@@ -1997,6 +2316,7 @@ export default function DashboardPage() {
       sender: 'me',
       senderName: nickname,
       senderAvatar: myAvatar,
+      senderAvatarUrl: avatarUrl,
       text: inputText,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       replyTo,
@@ -2339,12 +2659,32 @@ export default function DashboardPage() {
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-emerald-500 to-cyan-500 text-slate-950 flex items-center justify-center text-xs font-bold shadow-md">
-                {nickname.substring(0, 2).toUpperCase()}
+              <div className="relative group shrink-0">
+                <button
+                  onClick={() => avatarFileInputRef.current?.click()}
+                  disabled={isUploadingAvatar}
+                  title="Profil fotoğrafını değiştir"
+                  className="block"
+                >
+                  <Avatar avatarUrl={avatarUrl} initials={nickname.substring(0, 2).toUpperCase()} size={36} gradient className="rounded-xl shadow-md" />
+                  <div className="absolute inset-0 rounded-xl bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                    {isUploadingAvatar ? (
+                      <Activity size={14} className="text-white animate-spin" />
+                    ) : (
+                      <Plus size={14} className="text-white" />
+                    )}
+                  </div>
+                </button>
+                <input ref={avatarFileInputRef} type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
               </div>
               <div>
                 <h1 className="text-sm font-bold text-slate-200">{nickname}</h1>
                 <span className="text-[10px] text-emerald-400 font-mono">Çevrimiçi</span>
+                {avatarUrl && (
+                  <button onClick={handleRemoveAvatar} className="block text-[10px] text-slate-600 hover:text-rose-400 mt-0.5">
+                    Fotoğrafı kaldır
+                  </button>
+                )}
               </div>
             </div>
             <button onClick={requestNotificationPermission} className="p-2 bg-slate-800 text-slate-400 rounded-lg hover:bg-slate-700 transition-colors">
@@ -2423,8 +2763,8 @@ export default function DashboardPage() {
                           : 'bg-slate-900/40 border-slate-800 text-slate-300 hover:bg-slate-900'
                       }`}
                     >
-                      <div className="relative h-8 w-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-slate-200">
-                        {chat.avatar}
+                      <div className="relative shrink-0">
+                        <Avatar avatarUrl={chat.avatarUrl} initials={chat.avatar} size={32} />
                         {/* Çevrimiçi/çevrimdışı durumu küçük bir noktayla gösteriliyor */}
                         <span
                           className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-slate-950 ${
@@ -2569,6 +2909,11 @@ export default function DashboardPage() {
                 <div>
                   <div className="text-sm font-semibold flex items-center gap-1.5">
                     {currentRoom.name}
+                    {isRoomCreator && (
+                      <span title="Bu odanın sahibisin" className="inline-flex">
+                        <Crown size={12} className="text-amber-400" />
+                      </span>
+                    )}
                     <span className="text-[10px] text-slate-500 font-normal">({roomMembers.length}/{MAX_ROOM_PARTICIPANTS})</span>
                   </div>
                   <div className="text-xs text-slate-500 font-mono flex items-center gap-1">
@@ -2586,20 +2931,43 @@ export default function DashboardPage() {
                     <div
                       key={m.userId}
                       title={m.username}
-                      className={`h-8 w-8 rounded-full border-2 border-slate-950 flex items-center justify-center text-[10px] font-bold ${
+                      className={`h-8 w-8 rounded-full border-2 border-slate-950 overflow-hidden flex items-center justify-center text-[10px] font-bold ${
                         peersWithVoice[m.peerId] ? 'bg-emerald-500/20 text-emerald-400 ring-2 ring-emerald-500' : 'bg-slate-800 text-slate-300'
                       }`}
                     >
-                      {m.username.substring(0, 2).toUpperCase()}
+                      {m.avatarUrl ? (
+                        <img src={m.avatarUrl} alt={m.username} className="h-full w-full object-cover" />
+                      ) : (
+                        m.username.substring(0, 2).toUpperCase()
+                      )}
                     </div>
                   ))}
                 </div>
-                {/* MİKROFON BUTONU */}
+                {/* MİKROFON BUTONU — "her zaman açık" modda tıkla-aç/kapat,
+                    "bas-konuş" modda ise akış açıkken basılı tutunca konuşur */}
                 <button
-                  onClick={toggleMic}
-                  title={isMicOn ? 'Mikrofonu kapat' : 'Sesli görüşmeye katıl'}
-                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${
-                    isMicOn ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  onClick={() => {
+                    if (!isMicOn) { startMic(); return; }
+                    if (micMode === 'always') stopMic();
+                    // ptt modunda ve mikrofon zaten açıkken tek tıklama hiçbir şey yapmaz —
+                    // konuşmak için basılı tutulur, tamamen kapatmak için Ses Ayarları panelindeki butonu kullan.
+                  }}
+                  onMouseDown={startPttTalking}
+                  onMouseUp={stopPttTalking}
+                  onMouseLeave={stopPttTalking}
+                  onTouchStart={(e) => { e.preventDefault(); startPttTalking(); }}
+                  onTouchEnd={(e) => { e.preventDefault(); stopPttTalking(); }}
+                  title={
+                    micMode === 'ptt'
+                      ? (isMicOn ? 'Konuşmak için basılı tut (veya Space)' : 'Sesli görüşmeye katıl')
+                      : (isMicOn ? 'Mikrofonu kapat' : 'Sesli görüşmeye katıl')
+                  }
+                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-all select-none ${
+                    isMicOn
+                      ? (micMode === 'ptt'
+                          ? (isPttActive ? 'bg-emerald-500 text-slate-950 scale-110 ring-2 ring-emerald-400' : 'bg-slate-700 text-emerald-400')
+                          : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400')
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                   }`}
                 >
                   {isMicOn ? <Mic size={18} /> : <MicOff size={18} />}
@@ -2687,6 +3055,34 @@ export default function DashboardPage() {
                   </span>
                 </div>
 
+                {/* Konuşma modu: her zaman açık / bas-konuş */}
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-slate-400">Konuşma Modu</span>
+                  <div className="flex bg-[#1e1f22] rounded-lg p-0.5">
+                    <button
+                      onClick={() => micMode !== 'always' && toggleMicMode()}
+                      className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                        micMode === 'always' ? 'bg-[#3f4147] text-slate-100' : 'text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Her Zaman Açık
+                    </button>
+                    <button
+                      onClick={() => micMode !== 'ptt' && toggleMicMode()}
+                      className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                        micMode === 'ptt' ? 'bg-[#3f4147] text-slate-100' : 'text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Bas-Konuş
+                    </button>
+                  </div>
+                </div>
+                {micMode === 'ptt' && (
+                  <p className="text-[10px] text-slate-500 -mt-2">
+                    Konuşmak için <kbd className="px-1 py-0.5 bg-[#1e1f22] rounded border border-slate-700 text-slate-400">Boşluk</kbd> tuşuna ya da mikrofon ikonuna basılı tut.
+                  </p>
+                )}
+
                 {/* Kendi mikrofon seviyem */}
                 <div className="flex items-center gap-3">
                   <span className="text-[11px] text-slate-400 w-24 shrink-0">Mikrofon Seviyen</span>
@@ -2711,11 +3107,18 @@ export default function DashboardPage() {
                     roomMembers
                       .filter((m) => m.userId !== userId)
                       .map((m) => (
-                        <div key={m.userId} className="flex items-center gap-3">
-                          <div className="h-6 w-6 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[9px] font-bold text-slate-300 shrink-0">
-                            {m.username.substring(0, 2).toUpperCase()}
+                        <div key={m.userId} className="flex items-center gap-2">
+                          <div className="h-6 w-6 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[9px] font-bold text-slate-300 shrink-0 overflow-hidden">
+                            {m.avatarUrl ? (
+                              <img src={m.avatarUrl} alt={m.username} className="h-full w-full object-cover" />
+                            ) : (
+                              m.username.substring(0, 2).toUpperCase()
+                            )}
                           </div>
-                          <span className="text-xs text-slate-300 w-16 truncate shrink-0" title={m.username}>{m.username}</span>
+                          <span className="text-xs text-slate-300 w-16 truncate shrink-0 flex items-center gap-1" title={m.username}>
+                            {m.username}
+                            {currentRoom?.creatorId === m.userId && <Crown size={10} className="text-amber-400 shrink-0" />}
+                          </span>
                           <VolumeSlider
                             value={remoteVolumes[m.peerId] ?? 100}
                             onChange={(v) => setRemoteVolume(m.peerId, v)}
@@ -2731,6 +3134,25 @@ export default function DashboardPage() {
                           >
                             {remoteMuted[m.peerId] ? <VolumeX size={13} /> : <Volume2 size={13} />}
                           </button>
+                          {/* ODA SAHİBİ YETKİLERİ — sadece odayı oluşturan kişi görür */}
+                          {isRoomCreator && (
+                            <>
+                              <button
+                                onClick={() => handleForceMuteMember(m)}
+                                title="Bu kişinin mikrofonunu zorla kapat"
+                                className="p-1.5 rounded-lg text-slate-500 hover:text-amber-400 hover:bg-slate-800 transition-colors shrink-0"
+                              >
+                                <MicOff size={13} />
+                              </button>
+                              <button
+                                onClick={() => handleKickMember(m)}
+                                title="Odadan at"
+                                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors shrink-0"
+                              >
+                                <UserX size={13} />
+                              </button>
+                            </>
+                          )}
                         </div>
                       ))
                   )}
@@ -2750,11 +3172,9 @@ export default function DashboardPage() {
                     onClick={() => setViewingScreenPeerId('me')}
                     className="shrink-0 w-40 rounded-xl overflow-hidden border-2 border-indigo-500 relative group"
                   >
-                    <video
-                      ref={(el) => { if (el && screenStreamRef.current) el.srcObject = screenStreamRef.current; }}
-                      autoPlay
+                    <StreamVideo
+                      stream={screenStreamRef.current}
                       muted
-                      playsInline
                       className="w-full h-24 object-cover bg-slate-950"
                     />
                     <div className="absolute bottom-0 inset-x-0 bg-slate-950/80 text-[10px] text-slate-200 px-2 py-1 flex items-center gap-1">
@@ -2768,10 +3188,8 @@ export default function DashboardPage() {
                     onClick={() => setViewingScreenPeerId(pid)}
                     className="shrink-0 w-40 rounded-xl overflow-hidden border-2 border-slate-700 hover:border-indigo-500 relative transition-colors"
                   >
-                    <video
-                      ref={(el) => { if (el) el.srcObject = stream; }}
-                      autoPlay
-                      playsInline
+                    <StreamVideo
+                      stream={stream}
                       className="w-full h-24 object-cover bg-slate-950"
                     />
                     <div className="absolute bottom-0 inset-x-0 bg-slate-950/80 text-[10px] text-slate-200 px-2 py-1 flex items-center gap-1 truncate">
@@ -2790,11 +3208,9 @@ export default function DashboardPage() {
                     onClick={() => setViewingCameraPeerId('me')}
                     className="shrink-0 flex flex-col items-center gap-1"
                   >
-                    <video
-                      ref={(el) => { if (el && cameraStreamRef.current) el.srcObject = cameraStreamRef.current; }}
-                      autoPlay
+                    <StreamVideo
+                      stream={cameraStreamRef.current}
                       muted
-                      playsInline
                       className="h-16 w-16 rounded-full object-cover border-2 border-rose-500"
                     />
                     <span className="text-[10px] text-slate-400">Sen</span>
@@ -2806,10 +3222,8 @@ export default function DashboardPage() {
                     onClick={() => setViewingCameraPeerId(pid)}
                     className="shrink-0 flex flex-col items-center gap-1"
                   >
-                    <video
-                      ref={(el) => { if (el) el.srcObject = stream; }}
-                      autoPlay
-                      playsInline
+                    <StreamVideo
+                      stream={stream}
                       className="h-16 w-16 rounded-full object-cover border-2 border-slate-700 hover:border-rose-500 transition-colors"
                     />
                     <span className="text-[10px] text-slate-400 max-w-[64px] truncate">{cameraSharerNames[pid] || 'Katılımcı'}</span>
@@ -2829,11 +3243,19 @@ export default function DashboardPage() {
                     id={`msg-${msg.id}`}
                     className={`flex gap-3 max-w-[75%] rounded-lg transition-shadow ${msg.senderId === userId ? 'ml-auto flex-row-reverse' : 'mr-auto flex-row'}`}
                   >
-                    <div className={`h-7 w-7 rounded-lg text-[10px] font-bold flex items-center justify-center shrink-0 mt-1 ${
-                      msg.senderId === userId ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-300'
-                    }`}>
-                      {msg.senderAvatar}
-                    </div>
+                    {msg.senderAvatarUrl ? (
+                      <img
+                        src={msg.senderAvatarUrl}
+                        alt={msg.senderAvatar}
+                        className="h-7 w-7 rounded-lg object-cover shrink-0 mt-1"
+                      />
+                    ) : (
+                      <div className={`h-7 w-7 rounded-lg text-[10px] font-bold flex items-center justify-center shrink-0 mt-1 ${
+                        msg.senderId === userId ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-300'
+                      }`}>
+                        {msg.senderAvatar}
+                      </div>
+                    )}
                     <div className={`flex flex-col min-w-0 ${msg.senderId === userId ? 'items-end' : 'items-start'}`}>
                       <span className="text-[10px] text-slate-500 mb-0.5 px-1">{msg.senderName}</span>
                       <div className="min-w-0 w-full">
@@ -2954,9 +3376,7 @@ export default function DashboardPage() {
             {/* ODA BAŞLIĞI */}
             <div className="h-16 border-b border-slate-800 px-6 flex items-center justify-between bg-slate-900/20">
               <div className="flex items-center gap-3">
-                <div className="h-9 w-9 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 flex items-center justify-center text-xs font-bold">
-                  {currentChatUser.avatar}
-                </div>
+                <Avatar avatarUrl={currentChatUser.avatarUrl} initials={currentChatUser.avatar} size={36} className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-400" />
                 <div>
                   <div className="text-sm font-semibold flex items-center gap-1.5">
                     {currentChatUser.name}
@@ -2982,11 +3402,19 @@ export default function DashboardPage() {
                     id={`msg-${msg.id}`}
                     className={`flex gap-3 max-w-[75%] rounded-lg transition-shadow ${msg.sender === 'me' ? 'ml-auto flex-row-reverse' : 'mr-auto flex-row'}`}
                   >
-                    <div className={`h-7 w-7 rounded-lg text-[10px] font-bold flex items-center justify-center shrink-0 mt-1 ${
-                      msg.sender === 'me' ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-300'
-                    }`}>
-                      {msg.senderAvatar}
-                    </div>
+                    {msg.senderAvatarUrl ? (
+                      <img
+                        src={msg.senderAvatarUrl}
+                        alt={msg.senderAvatar}
+                        className="h-7 w-7 rounded-lg object-cover shrink-0 mt-1"
+                      />
+                    ) : (
+                      <div className={`h-7 w-7 rounded-lg text-[10px] font-bold flex items-center justify-center shrink-0 mt-1 ${
+                        msg.sender === 'me' ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-300'
+                      }`}>
+                        {msg.senderAvatar}
+                      </div>
+                    )}
                     <div className={`flex flex-col min-w-0 ${msg.sender === 'me' ? 'items-end' : 'items-start'}`}>
                       <span className="text-[10px] text-slate-500 mb-0.5 px-1">{msg.senderName}</span>
                       <div className="min-w-0 w-full">
@@ -3155,15 +3583,9 @@ export default function DashboardPage() {
           >
             ✕
           </button>
-          <video
-            ref={(el) => {
-              if (!el) return;
-              const stream = viewingScreenPeerId === 'me' ? screenStreamRef.current : screenShares[viewingScreenPeerId];
-              if (stream) el.srcObject = stream;
-            }}
-            autoPlay
+          <StreamVideo
+            stream={viewingScreenPeerId === 'me' ? screenStreamRef.current : screenShares[viewingScreenPeerId] || null}
             muted={viewingScreenPeerId === 'me'}
-            playsInline
             onClick={(e) => e.stopPropagation()}
             className="max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"
           />
@@ -3187,15 +3609,9 @@ export default function DashboardPage() {
           >
             ✕
           </button>
-          <video
-            ref={(el) => {
-              if (!el) return;
-              const stream = viewingCameraPeerId === 'me' ? cameraStreamRef.current : cameraStreams[viewingCameraPeerId];
-              if (stream) el.srcObject = stream;
-            }}
-            autoPlay
+          <StreamVideo
+            stream={viewingCameraPeerId === 'me' ? cameraStreamRef.current : cameraStreams[viewingCameraPeerId] || null}
             muted={viewingCameraPeerId === 'me'}
-            playsInline
             onClick={(e) => e.stopPropagation()}
             className="max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"
           />

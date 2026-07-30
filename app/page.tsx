@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 
-    export default function LoginPage() {
+export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(""); // Hata mesajı için yeni state
@@ -92,9 +92,13 @@ import { useState } from "react";
         <a href="/register" className="mt-6 text-emerald-400 text-sm hover:underline">
           Hesabın yok mu? Kayıt Ol
         </a>
+        {/* GEÇİCİ: Şifremi Unuttum kaldırıldı — Resend domain doğrulaması
+            tamamlanana kadar bu akış çalışmıyor (e-posta gitmiyor).
+            Domain doğrulanınca aşağıdaki linki geri açabilirsin:
         <a href="/forgot-password" className="mt-2 text-slate-500 text-sm hover:underline hover:text-slate-400">
           Şifremi Unuttum
         </a>
+        */}
       </div>
     </main>
   );
