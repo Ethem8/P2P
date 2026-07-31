@@ -3,7 +3,7 @@
 import { performLocalLogout } from '@/lib/auth';
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield, Send, Copy, CheckCircle, Wifi, Bell, MessageSquare, Users, Trash2, Key, Layers, Activity, Mail, Mic, MicOff, PhoneOff, Hash, Plus, LogIn, Volume2, VolumeX, Settings2, Smile, Paperclip, File as FileIcon, Download, Monitor, MonitorOff, Video, VideoOff, Reply, X, UserX, Crown } from 'lucide-react';
+import { Shield, Send, Copy, CheckCircle, Wifi, Bell, MessageSquare, Users, Trash2, Key, Layers, Activity, Mail, Mic, MicOff, PhoneOff, Hash, Plus, LogIn, Volume2, VolumeX, Settings2, Smile, Paperclip, File as FileIcon, Download, Monitor, MonitorOff, Video, VideoOff, Reply, X, UserX, Crown, Maximize2, Minimize2, Square, Play, Pause } from 'lucide-react';
 
 interface FileAttachment {
   name: string;
@@ -608,6 +608,7 @@ export default function DashboardPage() {
   const [cameraStreams, setCameraStreams] = useState<{ [peerId: string]: MediaStream }>({}); // odadaki diğer üyelerden gelen canlı kamera akışları
   const [cameraSharerNames, setCameraSharerNames] = useState<{ [peerId: string]: string }>({});
   const [viewingCameraPeerId, setViewingCameraPeerId] = useState<string | null>(null); // null | 'me' | peerId — büyük ekranda hangi kamera açık
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false); // ekran paylaşımı/kamera büyük görüntüleyicisi gerçek tam ekranda mı
 
   // Süper Admin için DB state'leri
   const [allUsers, setAllUsers] = useState<AdminUser[]>([]);
@@ -677,6 +678,33 @@ export default function DashboardPage() {
   // Bu oturumda geçmişi zaten çekilmiş oda ID'leri — aynı odaya çıkıp tekrar
   // girildiğinde geçmişi gereksiz yere tekrar tekrar çekmemek için.
   const loadedRoomHistoryRef = useRef<Set<string>>(new Set());
+
+  // Ekran paylaşımı / kamera büyük görüntüleyicilerini gerçek tarayıcı tam
+  // ekranına (adres çubuğu, sekmeler dahil her şeyin gizlendiği mod)
+  // geçirebilmek için konteyner elementlerin ref'leri.
+  const screenLightboxRef = useRef<HTMLDivElement>(null);
+  const cameraLightboxRef = useRef<HTMLDivElement>(null);
+
+  // Kullanıcı Esc'e basıp tarayıcının kendi tam ekranından çıkarsa (F11/Esc
+  // gibi), butonumuzun ikonunun da senkron kalması için tarayıcının kendi
+  // olayını dinliyoruz.
+  useEffect(() => {
+    const handleFullscreenChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  // Verilen elementi gerçek tarayıcı tam ekranına alır/çıkarır. Tarayıcı
+  // güvenlik politikası gereği bu, ancak bir kullanıcı tıklaması (gesture)
+  // içinde çağrılırsa çalışır — otomatik/sayfa açılışında tetiklenemez.
+  const toggleFullscreen = (el: HTMLElement | null) => {
+    if (!el) return;
+    if (!document.fullscreenElement) {
+      el.requestFullscreen?.().catch((err) => console.warn("Tam ekrana geçilemedi:", err));
+    } else {
+      document.exitFullscreen?.();
+    }
+  };
 
   useEffect(() => { currentRoomRef.current = currentRoom; }, [currentRoom]);
   useEffect(() => { isMicOnRef.current = isMicOn; }, [isMicOn]);
@@ -3573,11 +3601,19 @@ export default function DashboardPage() {
       {/* EKRAN PAYLAŞIMI BÜYÜK GÖRÜNTÜLEYİCİ */}
       {viewingScreenPeerId && (viewingScreenPeerId === 'me' ? screenStreamRef.current : screenShares[viewingScreenPeerId]) && (
         <div
-          className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-6"
+          ref={screenLightboxRef}
+          className={`fixed inset-0 z-[100] bg-black/95 flex items-center justify-center ${isFullscreen ? 'p-0' : 'p-6'}`}
           onClick={() => setViewingScreenPeerId(null)}
         >
           <button
-            onClick={() => setViewingScreenPeerId(null)}
+            onClick={(e) => { e.stopPropagation(); toggleFullscreen(screenLightboxRef.current); }}
+            className="absolute top-4 right-16 h-10 w-10 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition-colors"
+            title={isFullscreen ? 'Tam ekrandan çık' : 'Tam ekran yap'}
+          >
+            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button
+            onClick={() => { if (document.fullscreenElement) document.exitFullscreen(); setViewingScreenPeerId(null); }}
             className="absolute top-4 right-4 h-10 w-10 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition-colors"
             title="Kapat"
           >
@@ -3587,7 +3623,7 @@ export default function DashboardPage() {
             stream={viewingScreenPeerId === 'me' ? screenStreamRef.current : screenShares[viewingScreenPeerId] || null}
             muted={viewingScreenPeerId === 'me'}
             onClick={(e) => e.stopPropagation()}
-            className="max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"
+            className={isFullscreen ? "w-full h-full object-contain bg-slate-950" : "max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"}
           />
           <div className="absolute bottom-4 left-0 right-0 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
             <Monitor size={12} />
@@ -3599,11 +3635,19 @@ export default function DashboardPage() {
       {/* KAMERA BÜYÜK GÖRÜNTÜLEYİCİ */}
       {viewingCameraPeerId && (viewingCameraPeerId === 'me' ? cameraStreamRef.current : cameraStreams[viewingCameraPeerId]) && (
         <div
-          className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-6"
+          ref={cameraLightboxRef}
+          className={`fixed inset-0 z-[100] bg-black/95 flex items-center justify-center ${isFullscreen ? 'p-0' : 'p-6'}`}
           onClick={() => setViewingCameraPeerId(null)}
         >
           <button
-            onClick={() => setViewingCameraPeerId(null)}
+            onClick={(e) => { e.stopPropagation(); toggleFullscreen(cameraLightboxRef.current); }}
+            className="absolute top-4 right-16 h-10 w-10 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition-colors"
+            title={isFullscreen ? 'Tam ekrandan çık' : 'Tam ekran yap'}
+          >
+            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button
+            onClick={() => { if (document.fullscreenElement) document.exitFullscreen(); setViewingCameraPeerId(null); }}
             className="absolute top-4 right-4 h-10 w-10 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition-colors"
             title="Kapat"
           >
@@ -3613,7 +3657,7 @@ export default function DashboardPage() {
             stream={viewingCameraPeerId === 'me' ? cameraStreamRef.current : cameraStreams[viewingCameraPeerId] || null}
             muted={viewingCameraPeerId === 'me'}
             onClick={(e) => e.stopPropagation()}
-            className="max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"
+            className={isFullscreen ? "w-full h-full object-contain bg-slate-950" : "max-w-[92vw] max-h-[85vh] rounded-lg object-contain bg-slate-950"}
           />
           <div className="absolute bottom-4 left-0 right-0 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
             <Video size={12} />
