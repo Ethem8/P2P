@@ -355,6 +355,13 @@ function MessageReactions({
   );
 }
 
+// Saniyeyi "0:07", "1:23" gibi mm:ss formatına çevirir (ses kaydı süresi için).
+function formatDuration(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = Math.floor(totalSeconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -379,6 +386,7 @@ const EMOJI_LIST = [
 // tarayıcı belleğinde (data URL) tutuluyor, hiçbir sunucuya yüklenmiyor.
 function FileMessageContent({ file, onImageClick }: { file: FileAttachment; onImageClick?: (file: FileAttachment) => void }) {
   const isImage = file.mime.startsWith('image/');
+  const isAudio = file.mime.startsWith('audio/');
   if (isImage) {
     return (
       <button type="button" onClick={() => onImageClick?.(file)} className="block cursor-zoom-in">
@@ -389,6 +397,16 @@ function FileMessageContent({ file, onImageClick }: { file: FileAttachment; onIm
         />
         <div className="text-[10px] text-slate-500 mt-1 truncate text-left">{file.name}</div>
       </button>
+    );
+  }
+  if (isAudio) {
+    return (
+      <div className="flex items-center gap-2.5 bg-slate-950/40 border border-slate-700/60 rounded-xl px-3 py-2.5 max-w-[240px]">
+        <div className="h-8 w-8 rounded-full bg-emerald-500/15 flex items-center justify-center text-emerald-400 shrink-0">
+          <Mic size={14} />
+        </div>
+        <audio controls src={file.dataUrl} className="h-8 w-full" style={{ maxWidth: 180 }} />
+      </div>
     );
   }
   return (
@@ -610,6 +628,14 @@ export default function DashboardPage() {
   const [viewingCameraPeerId, setViewingCameraPeerId] = useState<string | null>(null); // null | 'me' | peerId — büyük ekranda hangi kamera açık
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false); // ekran paylaşımı/kamera büyük görüntüleyicisi gerçek tam ekranda mı
 
+  // --- SESLİ MESAJ KAYDI ---
+  const [isRecordingVoice, setIsRecordingVoice] = useState<boolean>(false);
+  const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
+  // Kayıt durdurulduktan sonra, gönderilmeden önce dinlenip onaylanabilen önizleme
+  const [recordedVoice, setRecordedVoice] = useState<{ dataUrl: string; mime: string; duration: number } | null>(null);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState<boolean>(false);
+  const [voiceError, setVoiceError] = useState<string>('');
+
   // Süper Admin için DB state'leri
   const [allUsers, setAllUsers] = useState<AdminUser[]>([]);
   const [dbRooms, setDbRooms] = useState<AdminRoom[]>([]);
@@ -684,6 +710,14 @@ export default function DashboardPage() {
   // geçirebilmek için konteyner elementlerin ref'leri.
   const screenLightboxRef = useRef<HTMLDivElement>(null);
   const cameraLightboxRef = useRef<HTMLDivElement>(null);
+
+  // --- SESLİ MESAJ KAYDI İÇİN REF'LER ---
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingIntervalRef = useRef<any>(null);
+  const previewAudioRef = useRef<HTMLAudioElement>(null);
+  const recordingSecondsRef = useRef<number>(0); // interval callback'i içinde stale closure olmadan güncel saniyeyi okumak için
 
   // Kullanıcı Esc'e basıp tarayıcının kendi tam ekranından çıkarsa (F11/Esc
   // gibi), butonumuzun ikonunun da senkron kalması için tarayıcının kendi
@@ -2203,6 +2237,174 @@ export default function DashboardPage() {
     });
   };
 
+  // =====================================================================
+  // SESLİ MESAJ KAYDI — WhatsApp/Telegram tarzı ses notu. Kayıt, mevcut
+  // dosya gönderme altyapısı (FileAttachment + FILE/ROOM_FILE mesaj tipi)
+  // üzerinden P2P olarak gönderiliyor; sadece mime tipi "audio/..." olunca
+  // mesaj balonunda oynatıcı olarak gösteriliyor (bkz. FileMessageContent).
+  // =====================================================================
+
+  const readBlobAsDataUrl = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const startVoiceRecording = async () => {
+    setVoiceError('');
+    setRecordedVoice(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      recordedChunksRef.current = [];
+
+      // Tarayıcının desteklediği ilk codec'i kullan (Safari/Chrome farklı destekler)
+      const preferredTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+      const mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        stream.getTracks().forEach((t) => t.stop());
+        recordingStreamRef.current = null;
+
+        if (blob.size === 0) return; // çok kısa/iptal edilmiş kayıt
+
+        try {
+          const dataUrl = await readBlobAsDataUrl(blob);
+          setRecordedVoice({
+            dataUrl,
+            mime: recorder.mimeType || 'audio/webm',
+            duration: recordingSecondsRef.current,
+          });
+        } catch (err) {
+          console.error("Kayıt işlenemedi:", err);
+          setVoiceError('Kayıt işlenirken bir hata oluştu.');
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecordingVoice(true);
+      setRecordingSeconds(0);
+      recordingSecondsRef.current = 0;
+      recordingIntervalRef.current = setInterval(() => {
+        recordingSecondsRef.current += 1;
+        setRecordingSeconds(recordingSecondsRef.current);
+      }, 1000);
+    } catch (err) {
+      console.error("Mikrofon erişimi alınamadı:", err);
+      setVoiceError('Mikrofona erişilemedi. Tarayıcı izinlerini kontrol et.');
+    }
+  };
+
+  // Kaydı durdurur ve dinleyip onaylayabileceğin bir önizlemeye geçer.
+  const stopVoiceRecording = () => {
+    if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+    setIsRecordingVoice(false);
+    try { mediaRecorderRef.current?.stop(); } catch {}
+  };
+
+  // Kaydı tamamen iptal eder — gönderilmeden atılır.
+  const cancelVoiceRecording = () => {
+    if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+    recordedChunksRef.current = [];
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      // onstop tetiklenmesin diye handler'ı boşaltıp öyle durduruyoruz
+      mediaRecorderRef.current.onstop = null;
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+    recordingStreamRef.current?.getTracks().forEach((t) => t.stop());
+    recordingStreamRef.current = null;
+    setIsRecordingVoice(false);
+    setRecordedVoice(null);
+    setIsPreviewPlaying(false);
+  };
+
+  const togglePreviewPlayback = () => {
+    const el = previewAudioRef.current;
+    if (!el) return;
+    if (el.paused) { el.play(); setIsPreviewPlaying(true); }
+    else { el.pause(); setIsPreviewPlaying(false); }
+  };
+
+  // Kaydedilen sesi, mevcut dosya gönderme mantığıyla (1-1 ya da grup,
+  // hangisi aktifse) P2P üzerinden yollar.
+  const sendVoiceMessage = () => {
+    if (!recordedVoice) return;
+    const fileAttachment: FileAttachment = {
+      name: `Sesli Mesaj (${formatDuration(recordedVoice.duration)})`,
+      mime: recordedVoice.mime,
+      size: Math.round((recordedVoice.dataUrl.length * 3) / 4), // base64 -> yaklaşık byte
+      dataUrl: recordedVoice.dataUrl,
+    };
+
+    const myAvatar = nickname.substring(0, 2).toUpperCase();
+    const messageId = generateMessageId();
+    const replyTo = replyingTo || undefined;
+    const captionText = `🎤 Sesli mesaj (${formatDuration(recordedVoice.duration)})`;
+
+    if (currentRoom) {
+      const payload = {
+        type: 'ROOM_FILE', messageId, senderId: userId, senderName: nickname,
+        senderAvatar: myAvatar, senderAvatarUrl: avatarUrl, text: captionText,
+        file: fileAttachment, replyTo,
+      };
+      Object.values(roomConnectionsRef.current).forEach((conn: any) => {
+        try { conn.send(payload); } catch {}
+      });
+      const localMsg: RoomMessage = {
+        id: messageId, senderId: userId, senderName: nickname, senderAvatar: myAvatar,
+        senderAvatarUrl: avatarUrl, text: captionText,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        file: fileAttachment, replyTo,
+      };
+      setGroupRoomMessages((prev) => ({
+        ...prev,
+        [currentRoom.id]: [...(prev[currentRoom.id] || []), localMsg],
+      }));
+      fetch('/api/messages/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: captionText, senderId: userId, roomId: currentRoom.id }),
+      }).catch((err) => console.error("Sesli mesaj arşivlenemedi:", err));
+    } else if (selectedPeerId) {
+      const payload = {
+        type: 'FILE', messageId, senderName: nickname, senderAvatar: myAvatar,
+        senderAvatarUrl: avatarUrl, text: captionText, file: fileAttachment, replyTo,
+      };
+      const activeConn = activeConnections.current[selectedPeerId];
+      if (activeConn) { try { activeConn.send(payload); } catch {} }
+      const newMessage: Message = {
+        id: messageId, sender: 'me', senderName: nickname, senderAvatar: myAvatar,
+        senderAvatarUrl: avatarUrl, text: captionText,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        file: fileAttachment, replyTo,
+      };
+      setChatRooms((prev) => ({
+        ...prev,
+        [selectedPeerId]: [...(prev[selectedPeerId] || []), newMessage],
+      }));
+      const recipientUserId = extractUserIdFromPeerId(selectedPeerId);
+      archiveMessageToDatabase(captionText, recipientUserId);
+    }
+
+    setReplyingTo(null);
+    setRecordedVoice(null);
+    setIsPreviewPlaying(false);
+  };
+
+  // =====================================================================
+  // SESLİ MESAJ KAYDI SONU
+  // =====================================================================
+
   // 1-1 SOHBETTE DOSYA GÖNDER
   const handleFileSelect1to1 = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -3357,47 +3559,107 @@ export default function DashboardPage() {
             )}
 
             {/* GRUP ODASI INPUT ALANI */}
-            <form onSubmit={handleSendRoomMessage} className="p-4 border-t border-slate-800 bg-slate-900/10 flex gap-3 relative">
-              <div className="relative">
+            {voiceError && (
+              <div className="px-4 pt-2 text-xs text-rose-400">{voiceError}</div>
+            )}
+            {isRecordingVoice ? (
+              // KAYIT SÜRÜYOR
+              <div className="p-4 border-t border-slate-800 bg-slate-900/10 flex items-center gap-3">
+                <span className="h-2.5 w-2.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                <span className="text-sm text-slate-300 font-mono flex-1">{formatDuration(recordingSeconds)}</span>
+                <button
+                  onClick={cancelVoiceRecording}
+                  title="İptal et"
+                  className="p-3 text-slate-400 hover:text-rose-400 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Trash2 size={18} />
+                </button>
+                <button
+                  onClick={stopVoiceRecording}
+                  title="Kaydı durdur"
+                  className="p-3 bg-rose-500 text-slate-950 rounded-xl hover:bg-rose-400 transition-colors"
+                >
+                  <Square size={18} />
+                </button>
+              </div>
+            ) : recordedVoice ? (
+              // KAYIT BİTTİ — GÖNDERMEDEN ÖNCE ÖNİZLEME
+              <div className="p-4 border-t border-slate-800 bg-slate-900/10 flex items-center gap-3">
+                <audio ref={previewAudioRef} src={recordedVoice.dataUrl} onEnded={() => setIsPreviewPlaying(false)} className="hidden" />
+                <button
+                  onClick={togglePreviewPlayback}
+                  className="p-3 bg-slate-800 text-slate-200 rounded-xl hover:bg-slate-700 transition-colors shrink-0"
+                >
+                  {isPreviewPlaying ? <Pause size={18} /> : <Play size={18} />}
+                </button>
+                <span className="text-sm text-slate-300 font-mono flex-1">{formatDuration(recordedVoice.duration)}</span>
+                <button
+                  onClick={cancelVoiceRecording}
+                  title="Sil"
+                  className="p-3 text-slate-400 hover:text-rose-400 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Trash2 size={18} />
+                </button>
+                <button
+                  onClick={sendVoiceMessage}
+                  title="Gönder"
+                  className="p-3 bg-cyan-500 text-slate-950 rounded-xl hover:bg-cyan-400 transition-colors"
+                >
+                  <Send size={18} />
+                </button>
+              </div>
+            ) : (
+              // NORMAL MESAJ YAZMA ALANI
+              <form onSubmit={handleSendRoomMessage} className="p-4 border-t border-slate-800 bg-slate-900/10 flex gap-3 relative">
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowEmojiPicker((v) => !v)}
+                    className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
+                  >
+                    <Smile size={18} />
+                  </button>
+                  {showEmojiPicker && (
+                    <EmojiPicker
+                      onSelect={insertEmoji}
+                      onClose={() => setShowEmojiPicker(false)}
+                    />
+                  )}
+                </div>
                 <button
                   type="button"
-                  onClick={() => setShowEmojiPicker((v) => !v)}
+                  onClick={() => roomFileInputRef.current?.click()}
+                  title="Dosya gönder"
                   className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
                 >
-                  <Smile size={18} />
+                  <Paperclip size={18} />
                 </button>
-                {showEmojiPicker && (
-                  <EmojiPicker
-                    onSelect={insertEmoji}
-                    onClose={() => setShowEmojiPicker(false)}
-                  />
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => roomFileInputRef.current?.click()}
-                title="Dosya gönder"
-                className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
-              >
-                <Paperclip size={18} />
-              </button>
-              <input
-                ref={roomFileInputRef}
-                type="file"
-                onChange={handleFileSelectRoom}
-                className="hidden"
-              />
-              <input
-                type="text"
-                placeholder={`#${currentRoom.name} odasına mesaj gönder...`}
-                value={roomInputText}
-                onChange={handleRoomInputChange}
-                className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 text-sm focus:outline-none focus:border-cyan-500 text-slate-100"
-              />
-              <button type="submit" className="p-3 bg-cyan-500 text-slate-950 rounded-xl hover:bg-cyan-400 transition-colors">
-                <Send size={18} />
-              </button>
-            </form>
+                <input
+                  ref={roomFileInputRef}
+                  type="file"
+                  onChange={handleFileSelectRoom}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={startVoiceRecording}
+                  title="Sesli mesaj kaydet"
+                  className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Mic size={18} />
+                </button>
+                <input
+                  type="text"
+                  placeholder={`#${currentRoom.name} odasına mesaj gönder...`}
+                  value={roomInputText}
+                  onChange={handleRoomInputChange}
+                  className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 text-sm focus:outline-none focus:border-cyan-500 text-slate-100"
+                />
+                <button type="submit" className="p-3 bg-cyan-500 text-slate-950 rounded-xl hover:bg-cyan-400 transition-colors">
+                  <Send size={18} />
+                </button>
+              </form>
+            )}
           </>
         ) : selectedPeerId && currentChatUser ? (
           <>
@@ -3508,47 +3770,107 @@ export default function DashboardPage() {
             )}
 
             {/* MESAJ INPUT ALANI */}
-            <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-900/10 flex gap-3 relative">
-              <div className="relative">
+            {voiceError && (
+              <div className="px-4 pt-2 text-xs text-rose-400">{voiceError}</div>
+            )}
+            {isRecordingVoice ? (
+              // KAYIT SÜRÜYOR
+              <div className="p-4 border-t border-slate-800 bg-slate-900/10 flex items-center gap-3">
+                <span className="h-2.5 w-2.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                <span className="text-sm text-slate-300 font-mono flex-1">{formatDuration(recordingSeconds)}</span>
+                <button
+                  onClick={cancelVoiceRecording}
+                  title="İptal et"
+                  className="p-3 text-slate-400 hover:text-rose-400 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Trash2 size={18} />
+                </button>
+                <button
+                  onClick={stopVoiceRecording}
+                  title="Kaydı durdur"
+                  className="p-3 bg-rose-500 text-slate-950 rounded-xl hover:bg-rose-400 transition-colors"
+                >
+                  <Square size={18} />
+                </button>
+              </div>
+            ) : recordedVoice ? (
+              // KAYIT BİTTİ — GÖNDERMEDEN ÖNCE ÖNİZLEME
+              <div className="p-4 border-t border-slate-800 bg-slate-900/10 flex items-center gap-3">
+                <audio ref={previewAudioRef} src={recordedVoice.dataUrl} onEnded={() => setIsPreviewPlaying(false)} className="hidden" />
+                <button
+                  onClick={togglePreviewPlayback}
+                  className="p-3 bg-slate-800 text-slate-200 rounded-xl hover:bg-slate-700 transition-colors shrink-0"
+                >
+                  {isPreviewPlaying ? <Pause size={18} /> : <Play size={18} />}
+                </button>
+                <span className="text-sm text-slate-300 font-mono flex-1">{formatDuration(recordedVoice.duration)}</span>
+                <button
+                  onClick={cancelVoiceRecording}
+                  title="Sil"
+                  className="p-3 text-slate-400 hover:text-rose-400 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Trash2 size={18} />
+                </button>
+                <button
+                  onClick={sendVoiceMessage}
+                  title="Gönder"
+                  className="p-3 bg-emerald-500 text-slate-950 rounded-xl hover:bg-emerald-400 transition-colors"
+                >
+                  <Send size={18} />
+                </button>
+              </div>
+            ) : (
+              // NORMAL MESAJ YAZMA ALANI
+              <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-900/10 flex gap-3 relative">
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowEmojiPicker((v) => !v)}
+                    className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
+                  >
+                    <Smile size={18} />
+                  </button>
+                  {showEmojiPicker && (
+                    <EmojiPicker
+                      onSelect={insertEmoji}
+                      onClose={() => setShowEmojiPicker(false)}
+                    />
+                  )}
+                </div>
                 <button
                   type="button"
-                  onClick={() => setShowEmojiPicker((v) => !v)}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Dosya gönder"
                   className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
                 >
-                  <Smile size={18} />
+                  <Paperclip size={18} />
                 </button>
-                {showEmojiPicker && (
-                  <EmojiPicker
-                    onSelect={insertEmoji}
-                    onClose={() => setShowEmojiPicker(false)}
-                  />
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                title="Dosya gönder"
-                className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
-              >
-                <Paperclip size={18} />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                onChange={handleFileSelect1to1}
-                className="hidden"
-              />
-              <input
-                type="text"
-                placeholder={`${currentChatUser.name} kullanıcısına güvenli mesaj gönder...`}
-                value={inputText}
-                onChange={handleInputChange}
-                className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 text-sm focus:outline-none focus:border-emerald-500 text-slate-100"
-              />
-              <button type="submit" className="p-3 bg-emerald-500 text-slate-950 rounded-xl hover:bg-emerald-400 transition-colors">
-                <Send size={18} />
-              </button>
-            </form>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  onChange={handleFileSelect1to1}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={startVoiceRecording}
+                  title="Sesli mesaj kaydet"
+                  className="p-3 text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded-xl transition-colors"
+                >
+                  <Mic size={18} />
+                </button>
+                <input
+                  type="text"
+                  placeholder={`${currentChatUser.name} kullanıcısına güvenli mesaj gönder...`}
+                  value={inputText}
+                  onChange={handleInputChange}
+                  className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 text-sm focus:outline-none focus:border-emerald-500 text-slate-100"
+                />
+                <button type="submit" className="p-3 bg-emerald-500 text-slate-950 rounded-xl hover:bg-emerald-400 transition-colors">
+                  <Send size={18} />
+                </button>
+              </form>
+            )}
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-500 p-8 text-center">
