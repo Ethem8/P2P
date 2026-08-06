@@ -378,6 +378,99 @@ const EMOJI_LIST = [
   '⚽', '🎮', '🎵', '📌', '📎', '✅', '❌', '❓', '❗', '💡',
 ];
 
+// Sesli mesajlar için özel oynatıcı: gerçek ses dalgası (Web Audio API ile
+// dosyadan çıkarılan genlik verisi), oynatma ilerlemesi ve süre gösterir.
+// DÜZELTME: native <audio controls> elementi mesaj balonu genişliğine
+// sığdırılınca (küçük yükseklik) bazı tarayıcılarda oynat düğmesi
+// görünmez/tıklanamaz hale geliyordu — bu yüzden tamamen kendi
+// butonumuzla (büyük, garantili tıklanabilir) oynatma kontrolü sağlıyoruz.
+function VoiceMessagePlayer({ file }: { file: FileAttachment }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [bars, setBars] = useState<number[] | null>(null);
+
+  // Dosyadan gerçek ses dalgası (waveform) çıkar. Başarısız olursa (bazı
+  // tarayıcı/codec kombinasyonlarında decodeAudioData çalışmayabilir)
+  // görsel amaçlı sabit bir dalga desenine düşer — oynatmayı etkilemez,
+  // sadece görünümü.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioContextClass();
+        const res = await fetch(file.dataUrl);
+        const arrayBuffer = await res.arrayBuffer();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        const raw = audioBuffer.getChannelData(0);
+        const barCount = 32;
+        const blockSize = Math.max(1, Math.floor(raw.length / barCount));
+        const peaks: number[] = [];
+        for (let i = 0; i < barCount; i++) {
+          let sum = 0;
+          for (let j = 0; j < blockSize; j++) sum += Math.abs(raw[i * blockSize + j] || 0);
+          peaks.push(sum / blockSize);
+        }
+        const max = Math.max(...peaks, 0.01);
+        if (!cancelled) setBars(peaks.map((p) => Math.max(0.15, p / max)));
+        ctx.close();
+      } catch (err) {
+        console.warn("Ses dalgası oluşturulamadı, sabit desen kullanılıyor:", err);
+        if (!cancelled) setBars(Array.from({ length: 32 }, (_, i) => 0.3 + 0.5 * Math.abs(Math.sin(i * 0.7))));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [file.dataUrl]);
+
+  const togglePlay = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) { el.play(); setIsPlaying(true); }
+    else { el.pause(); setIsPlaying(false); }
+  };
+
+  const displayedBars = bars || Array.from({ length: 32 }, () => 0.3);
+  const progress = duration > 0 ? currentTime / duration : 0;
+
+  return (
+    <div className="flex items-center gap-2.5 bg-slate-950/40 border border-slate-700/60 rounded-xl px-3 py-2.5 max-w-[260px]">
+      <audio
+        ref={audioRef}
+        src={file.dataUrl}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onEnded={() => { setIsPlaying(false); setCurrentTime(0); }}
+        className="hidden"
+      />
+      <button
+        onClick={togglePlay}
+        className="h-9 w-9 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center shrink-0 hover:bg-emerald-400 active:scale-95 transition-all"
+      >
+        {isPlaying ? <Pause size={15} /> : <Play size={15} className="ml-0.5" />}
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-end gap-[2px] h-6">
+          {displayedBars.map((h, i) => {
+            const isPlayed = i / displayedBars.length < progress;
+            return (
+              <div
+                key={i}
+                style={{ height: `${Math.max(15, h * 100)}%` }}
+                className={`flex-1 rounded-full transition-colors ${isPlayed ? 'bg-emerald-400' : 'bg-slate-600'}`}
+              />
+            );
+          })}
+        </div>
+        <div className="text-[10px] text-slate-500 mt-1 font-mono">
+          {formatDuration(currentTime > 0 ? currentTime : duration)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Mesaj balonu içinde bir dosya ekini gösterir: resimse önizleme, değilse
 // indirme kartı. Dosya tamamen tarayıcı belleğinde (data URL) tutuluyor,
 // hiçbir sunucuya yüklenmiyor.
@@ -400,14 +493,7 @@ function FileMessageContent({ file, onImageClick }: { file: FileAttachment; onIm
     );
   }
   if (isAudio) {
-    return (
-      <div className="flex items-center gap-2.5 bg-slate-950/40 border border-slate-700/60 rounded-xl px-3 py-2.5 max-w-[240px]">
-        <div className="h-8 w-8 rounded-full bg-emerald-500/15 flex items-center justify-center text-emerald-400 shrink-0">
-          <Mic size={14} />
-        </div>
-        <audio controls src={file.dataUrl} className="h-8 w-full" style={{ maxWidth: 180 }} />
-      </div>
-    );
+    return <VoiceMessagePlayer file={file} />;
   }
   return (
     <a
